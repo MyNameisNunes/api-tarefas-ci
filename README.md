@@ -1,5 +1,7 @@
 # API de Tarefas com CI no GitHub Actions
 
+[![CI](https://github.com/MyNameisNunes/api-tarefas-ci/actions/workflows/ci.yml/badge.svg)](https://github.com/MyNameisNunes/api-tarefas-ci/actions/workflows/ci.yml)
+
 API REST (Node.js 24, TypeScript, Express) com banco de dados SQL (PostgreSQL),
 usada para demonstrar um pipeline de Integração Contínua no GitHub Actions.
 

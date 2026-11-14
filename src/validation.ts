@@ -27,3 +27,6 @@ export function parseId(raw: string): number | null {
   const id = Number(raw);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
+
+// Erro proposital para demonstrar o Fail Fast: variável não utilizada.
+const limiteNaoUsado = 200;

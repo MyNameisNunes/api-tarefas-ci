@@ -1,0 +1,247 @@
+# ======================================================================
+# CI - Integração Contínua da API de Tarefas
+# Valida todo Pull Request destinado à main, na ordem Fail Fast:
+#   1. quality   -> lint (ESLint), formatação (Prettier) e tipos (tsc)
+#   2. security  -> análise estática de segurança (CodeQL + npm audit)
+#   3. build     -> compilação TypeScript
+#   4. test      -> testes unitários e de integração (PostgreSQL)
+#   5. docker    -> build da imagem e push no GHCR
+#   6. ci-status -> check único exigido pela proteção de branch
+# ======================================================================
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    # Tipos padrão: opened, synchronize (novo push) e reopened.
+
+# Privilégio mínimo: o GITHUB_TOKEN apenas lê o repositório.
+permissions:
+  contents: read
+
+# Novo push no mesmo PR cancela a execução anterior (obsoleta).
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # --------------------------------------------------------------------
+  # 1. Análise estática e de formatação
+  # --------------------------------------------------------------------
+  quality:
+    name: Lint, formatação e tipos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Configurar Node.js com cache do npm
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Análise estática (ESLint + eslint-plugin-security)
+        run: npm run lint
+
+      - name: Análise de formatação (Prettier)
+        run: npm run format:check
+
+      - name: Checagem de tipos (TypeScript)
+        run: npm run typecheck
+
+  # --------------------------------------------------------------------
+  # 2. Análise estática de segurança (SAST + dependências)
+  # --------------------------------------------------------------------
+  security:
+    name: Análise de segurança
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # publicar os resultados do CodeQL
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Auditoria de dependências (npm audit)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Inicializar CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+
+      - name: Executar análise CodeQL
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript
+
+  # --------------------------------------------------------------------
+  # 3. Build
+  # --------------------------------------------------------------------
+  build:
+    name: Build da aplicação
+    needs: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Compilar a aplicação
+        run: npm run build
+
+      - name: Publicar o artefato de build
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  # --------------------------------------------------------------------
+  # 4. Testes unitários e de integração
+  # --------------------------------------------------------------------
+  test:
+    name: Testes unitários e de integração
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres: # banco SQL real e descartável, exclusivo deste job
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app # descartável, não é um secret
+          POSTGRES_DB: app_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/app_test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Testes unitários
+        run: npm run test:unit
+
+      - name: Testes de integração (API + PostgreSQL)
+        run: npm run test:integration
+
+  # --------------------------------------------------------------------
+  # 5. Criação da imagem Docker
+  # --------------------------------------------------------------------
+  docker:
+    name: Build da imagem Docker
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # necessário só para o push no GHCR
+    env:
+      # Publica só PRs do próprio repositório (forks: só build).
+      PUSH_IMAGE: >-
+        ${{ github.event.pull_request.head.repo.full_name
+        == github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Gerar tags e labels OCI
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          # usa o SHA do commit do PR, não o do merge commit temporário
+          DOCKER_METADATA_PR_HEAD_SHA: 'true'
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=pr
+
+      - name: Login no GitHub Container Registry
+        if: env.PUSH_IMAGE == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e push da imagem
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ env.PUSH_IMAGE == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # --------------------------------------------------------------------
+  # 6. Check agregador exigido pela proteção de branch
+  # --------------------------------------------------------------------
+  ci-status:
+    name: CI Status
+    if: always()
+    needs: [quality, security, build, test, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verificar o resultado de todos os jobs
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Resultados: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "::error::CI reprovado: um job terminou como '$r'."
+              exit 1
+            fi
+          done
+          echo "Todos os jobs passaram."

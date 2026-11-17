@@ -26,6 +26,10 @@ Disparado em todo Pull Request para `main`, na ordem Fail Fast:
 4. Testes unitários (Vitest) e de integração (API + PostgreSQL)
 5. Criação da imagem Docker (push no GHCR com tag do SHA do commit)
 
+O workflow também roda no push para a `main` (após o merge), o que dá ao
+CodeQL a linha de base da branch principal. A `main` é protegida por uma
+ruleset que exige Pull Request e o check `CI Status` aprovado.
+
 ## Executar localmente
 
 ```bash

@@ -7,6 +7,8 @@
 #   4. test      -> testes unitários e de integração (PostgreSQL)
 #   5. docker    -> build da imagem e push no GHCR
 #   6. ci-status -> check único exigido pela proteção de branch
+# Também roda no push para a main (após o merge), o que dá ao CodeQL
+# a linha de base da branch principal para comparar com cada PR.
 # ======================================================================
 name: CI
 
@@ -14,15 +16,18 @@ on:
   pull_request:
     branches: [main]
     # Tipos padrão: opened, synchronize (novo push) e reopened.
+  push:
+    branches: [main] # validação pós-merge e linha de base do CodeQL
 
 # Privilégio mínimo: o GITHUB_TOKEN apenas lê o repositório.
 permissions:
   contents: read
 
 # Novo push no mesmo PR cancela a execução anterior (obsoleta).
+# Na main nada é cancelado: cada merge é validado até o fim.
 concurrency:
-  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
@@ -181,7 +186,7 @@ jobs:
       contents: read
       packages: write # necessário só para o push no GHCR
     env:
-      # Publica só PRs do próprio repositório (forks: só build).
+      # Publica só PRs do próprio repositório (forks e push: só build).
       PUSH_IMAGE: >-
         ${{ github.event.pull_request.head.repo.full_name
         == github.repository }}
